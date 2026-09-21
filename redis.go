@@ -1,7 +1,10 @@
 package redis
 
 import (
+	"encoding/json"
 	"fmt"
+	"reflect"
+	"strconv"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -51,17 +54,105 @@ func (r *Redis) Uninstall() error {
 
 func (r *Redis) Set(key string, value any, ttl time.Duration) error {
 	ctx := r.Client.Context()
-	return r.Client.Set(ctx, key, value, ttl).Err()
+
+	var val string
+
+	// 1. Dereference jika value berupa pointer (seperti pada MemoryCache)
+	rv := reflect.ValueOf(value)
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return fmt.Errorf("cannot set nil pointer value for key %s", key)
+		}
+		value = rv.Elem().Interface()
+	}
+
+	// 2. Format tipe data primitif ke string, sisanya ke JSON
+	switch v := value.(type) {
+	case string:
+		val = v
+	case int:
+		val = strconv.FormatInt(int64(v), 10)
+	case int8:
+		val = strconv.FormatInt(int64(v), 10)
+	case int16:
+		val = strconv.FormatInt(int64(v), 10)
+	case int32:
+		val = strconv.FormatInt(int64(v), 10)
+	case int64:
+		val = strconv.FormatInt(v, 10)
+	case uint:
+		val = strconv.FormatUint(uint64(v), 10)
+	case uint8:
+		val = strconv.FormatUint(uint64(v), 10)
+	case uint16:
+		val = strconv.FormatUint(uint64(v), 10)
+	case uint32:
+		val = strconv.FormatUint(uint64(v), 10)
+	case uint64:
+		val = strconv.FormatUint(v, 10)
+	case bool:
+		val = "0"
+		if v {
+			val = "1"
+		}
+	case float32:
+		val = strconv.FormatFloat(float64(v), 'f', -1, 32)
+	case float64:
+		val = strconv.FormatFloat(v, 'f', -1, 64)
+	default:
+		bytes, err := json.Marshal(value)
+		if err != nil {
+			return fmt.Errorf("failed to marshal cache value for key %s: %w", key, err)
+		}
+		val = string(bytes)
+	}
+
+	return r.Client.Set(ctx, key, val, ttl).Err()
 }
 
-func (r *Redis) Get(key string) (any, bool) {
+func (r *Redis) Get(key string, outvalue any) bool {
 	ctx := r.Client.Context()
+
 	val, err := r.Client.Get(ctx, key).Result()
-	if err == redis.Nil {
-		return nil, false
+	if err == redis.Nil || err != nil {
+		return false
 	}
-	if err != nil {
-		return nil, false
+
+	// Validasi outvalue harus berupa pointer dan tidak nil
+	rv := reflect.ValueOf(outvalue)
+	if rv.Kind() != reflect.Ptr || rv.IsNil() {
+		return false
 	}
-	return val, true
+
+	elem := rv.Elem()
+
+	switch elem.Kind() {
+	case reflect.String:
+		elem.SetString(val)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		i, err := strconv.ParseInt(val, 10, 64)
+		if err == nil {
+			elem.SetInt(i)
+		}
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		i, err := strconv.ParseUint(val, 10, 64)
+		if err == nil {
+			elem.SetUint(i)
+		}
+	case reflect.Bool:
+		elem.SetBool(val == "1")
+	case reflect.Float32, reflect.Float64:
+		f, err := strconv.ParseFloat(val, 64)
+		if err == nil {
+			elem.SetFloat(f)
+		}
+	default:
+		// Tipe kompleks (struct/map/slice) di-unmarshal dari JSON string
+		err := json.Unmarshal([]byte(val), outvalue)
+		if err != nil {
+			return false
+		}
+	}
+
+	return true
 }
