@@ -156,3 +156,8 @@ func (r *Redis) Get(key string, outvalue any) bool {
 
 	return true
 }
+func (r *Redis) Delete(key string) error {
+	ctx := r.Client.Context()
+
+	return r.Client.Del(ctx, key).Err()
+}
